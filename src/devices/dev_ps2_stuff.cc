@@ -41,6 +41,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "console.h"
 #include "cpu.h"
 #include "device.h"
 #include "machine.h"
@@ -78,6 +79,8 @@ struct ps2_data {
 	uint32_t	sbus_smflg;
 	struct interrupt intr_irq;		/*  MIPS irq 2  */
 	struct interrupt sbus_irq;		/*  PS2 irq 1  */
+
+	int		console_handle;
 };
 
 #define	DEV_PS2_LENGTH		0x10000
@@ -370,6 +373,27 @@ DEVICE_ACCESS(ps2)
 				INTERRUPT_DEASSERT(d->sbus_irq);
 		}
 		break;
+
+	case 0xf130:	/* sio interrupt status register */
+		if (writeflag==MEM_READ) {
+			/* TODO:Find out what really goes into PS2's SIO ISR */
+			if (console_charavail(d->console_handle))
+				odata = 0xf00;
+			else
+				odata = 0x000;
+		}
+		break;
+	case 0xf180:	/* sio transmit FIFO */
+		if (writeflag==MEM_WRITE) {
+			console_putchar(d->console_handle, idata);
+		}
+		break;
+	case 0xf1c0:	/* sio receive FIFO */
+		if (writeflag==MEM_READ) {
+			int x = console_readchar(d->console_handle);
+			odata = x < 0? 0 : x;
+		}
+		break;
 	default:
 		if (writeflag==MEM_READ) {
 			debug("[ ps2: read from addr 0x%x: 0x%llx ]\n",
@@ -466,6 +490,10 @@ DEVINIT(ps2)
 	    DEV_PS2_LENGTH, dev_ps2_access, d, DM_DEFAULT, NULL);
 	machine_add_tickfunction(devinit->machine,
 	    dev_ps2_tick, d, TICK_STEPS_SHIFT);
+
+	d->console_handle =
+	    console_start_slave(devinit->machine, devinit->name2 != NULL?
+	    devinit->name2 : devinit->name, devinit->in_use);
 
 	return 1;
 }
