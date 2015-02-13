@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2003-2011  Anders Gavare.  All rights reserved.
+ *  Copyright (C) 2003-2012  Anders Gavare.  All rights reserved.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions are met:
@@ -362,7 +362,7 @@ static void usage(int longusage)
 	    "of a simulation\n");
 	printf("  -q        quiet mode (don't print startup messages)\n");
 	printf("  -V        start up in the single-step debugger, paused\n");
-	printf("  -v        verbose debug messages\n");
+	printf("  -v        increase debug message verbosity\n");
 	printf("\n");
 	printf("If you are selecting a machine type to emulate directly "
 	    "on the command line,\nthen you must specify one or more names"
@@ -770,10 +770,10 @@ int get_cmd_args(int argc, char *argv[], struct emul *emul,
 int main(int argc, char *argv[])
 {
 	/*  Setting constants:  */
-	const int constant_yes = 1;
-	const int constant_true = 1;
-	const int constant_no = 0;
-	const int constant_false = 0;
+	int constant_yes = 1;
+	int constant_true = 1;
+	int constant_no = 0;
+	int constant_false = 0;
 
 	struct emul *emul;
 	int config_file = 0;

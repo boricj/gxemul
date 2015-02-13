@@ -4577,4 +4577,51 @@ Changelog for GXemul:
 		textures yet.
 20110706	Implementing register pair variant of SuperH fmov_frm_rn,
 		adding implementations of "LDS Rm,MACH", and "LDS Rm,MACL".
+20110902	Reviving the old legacy Alpha CPU support, which was removed
+		20090703 (i.e. NOT using the new framework).
+20110906	Slowly continuing on the Alpha emulation mode: going through
+		the existing virtual memory and PALcode stuff.
+20120120	Avoid crash in cpu_ppc_instr_loadstore.cc for 64-bit emulation
+		(since only 32-bit access is actually implemented); fallback
+		to generic (slow) access.
+		Minor OpenFirmware and SPR fixes to reach further with a
+		FreeBSD/powerpc 9.0 kernel (-Xe g4).
+		Updating the NetBSD/pmax install instructions: 5.1 -> 5.1.1.
+		Updating the NetBSD/cobalt install instructions 5.0.1 to 5.1.1.
+		Redirect PowerPC SPRs 0x10c/10d to 0x11c/11d (Time Base).
+20120121	Updating OpenBSD/landisk installation instructions: 4.9 -> 5.0.
+20120507	Adding a patch from Juli Mallett for MIPS rdhwr reg 29.
+20120617	Adding a patch from James Peacock for ARM MSR fields.
+20120724	Adding a patch from David Brownlee (mkstemp on NetBSD), and
+		trying to make things build without warnings with GCC 4.6.x.
+20120731	Adding a patch from David Brownlee: a more reasonable TOC is
+		returned in dev_dreamcast_gdrom.cc (for NetBSD/dreamcast).
+20120906	Adding a patch from George Koehler to fix DHCP response bug.
+20120922	Fixing an ARM instruction encoding bug: for shifter_operand
+		immediates, the carry bit should be set to bit 31 of the
+		shifter_operand if and only if rotate_imm != 0. I've added
+		detection for the case when this would bug out (although I
+		have never seen it happen yet), and fixed a bug which did
+		happen: for short register formats (i.e. no shift or other
+		complex things), the code should not be run, but it was run
+		anyway, leading to wrong Carry flag results for e.g. the TST
+		instruction. This was triggered when running int64_t modulo.
+20130907	Updating NetBSD/dreamcast test instructions: 5.1 -> 6.1.1.
+		Updating NetBSD/pmax install instructions: 5.1.1 -> 6.1.1.
+20131006	Adding a dummy Raspberry Pi machine mode.
+20131109	Updating OpenBSD/landisk install instructions: 5.0 -> 5.4.
+20140803	Some cleanup and minor progress of the Dreamcast PVR graphics.
+		(The graphics displayed when attempting to run the original
+		ROM now looks more reasonable.)
+		Updating NetBSD/dreamcast test instructions: 6.1.1 -> 6.1.4.
+		Updating NetBSD/pmax install instructions: 6.1.1 -> 6.1.4.
+		Renaming machine mvme187 to mvme187old to avoid collision.
+		Enabling ELF file support for 88K experiments.
+20140805	Fixing color bug in dev_pvr.cc simpleline, which is used when
+		rendering Gouraud shaded triangles.
+20140810	Beginning on disassembly of ARM THUMB (16-bit) encoding.
+20140815	Adding rudimentary culling of clockwise / counter-clockwise
+		polygons in the PVR rendering code.
+20140816	Fixing console.cc so that it doesn't complain about buffer
+		overrun when pasting a lot of data.
 

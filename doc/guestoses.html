@@ -16,7 +16,7 @@
 
 <!--
 
-Copyright (C) 2003-2011  Anders Gavare.  All rights reserved.
+Copyright (C) 2003-2014  Anders Gavare.  All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
@@ -47,10 +47,10 @@ SUCH DAMAGE.
 <ul>
   <li><a href="#generalnotes">General notes on running "guest OSes"</a>
   <li><a href="#legacy">Legacy emulation modes</a>
-  <li><a href="#netbsdpmaxinstall">NetBSD/pmax 5.1</a>
+  <li><a href="#netbsdpmaxinstall">NetBSD/pmax 6.1.4</a>
   <li><a href="#netbsdarcinstall">NetBSD/arc 5.0.1</a>
   <li><a href="#netbsdhpcmipsinstall">NetBSD/hpcmips 5.0.2</a>
-  <li><a href="#netbsdcobaltinstall">NetBSD/cobalt 5.0.1</a>
+  <li><a href="#netbsdcobaltinstall">NetBSD/cobalt 5.1.1</a>
   <li><a href="#netbsdevbmipsinstall">NetBSD/evbmips 5.0.2</a>
   <li><a href="#netbsdalgorinstall">NetBSD/algor 5.0.2</a>
   <li><a href="#netbsdsgimips">NetBSD/sgimips 5.0</a>
@@ -65,7 +65,7 @@ SUCH DAMAGE.
   <li><a href="dreamcast.html#linux_live_cd">Linux/dreamcast</a>
   <li><a href="#openbsdpmaxinstall">OpenBSD/pmax 2.8-BETA</a>
   <li><a href="#openbsdcatsinstall">OpenBSD/cats 4.0</a>
-  <li><a href="#openbsdlandiskinstall">OpenBSD/landisk 4.9</a>
+  <li><a href="#openbsdlandiskinstall">OpenBSD/landisk 5.4</a>
   <li><a href="#openbsdmvme88kinstall">OpenBSD/mvme88k 4.5</a>
   <li><a href="#helenos">HelenOS 0.4.0</a>
   <li><a href="#ultrixinstall">Ultrix/RISC 4.5</a>
@@ -218,11 +218,11 @@ follow these instructions:
 
 </pre>
   <li>Download a NetBSD CD-ROM iso image:<pre>
-	<a href="ftp://ftp.netbsd.org/pub/NetBSD/iso/5.1/pmaxcd-5.1.iso">ftp://ftp.netbsd.org/pub/NetBSD/iso/5.1/pmaxcd-5.1.iso</a>
+	<a href="ftp://ftp.netbsd.org/pub/NetBSD/iso/6.1.4/NetBSD-6.1.4-pmax.iso">ftp://ftp.netbsd.org/pub/NetBSD/iso/6.1.4/NetBSD-6.1.4-pmax.iso</a>
 
 </pre>
   <li>Start the emulator like this:<pre>
-	<b>gxemul -X -e 3max -d nbsd_pmax.img -d b:pmaxcd-5.1.iso</b>
+	<b>gxemul -X -e 3max -d nbsd_pmax.img -d b:NetBSD-6.1.4-pmax.iso</b>
 </pre>
 </ol>
 
@@ -241,8 +241,12 @@ NetBSD from the harddisk image:<pre>
 
 and log in as <tt>root</tt>. Type <tt>startx</tt> to start X windows.
 
-<p>(Remove <b><tt>-X</tt></b> if you only want a serial console.)
+<p>Remove <b><tt>-X</tt></b> if you only want a serial console.
 
+<p>(It seems that NetBSD 6.1.4 needs the user to enter root disk
+name (<tt>sd0</tt>) when booting. I don't think that was necessary when
+booting earlier NetBSD versions in the emulator,
+so there has been some regression here.)
 
 
 
@@ -400,12 +404,12 @@ image:
 
 </pre>
   <li>Download the generic kernel for Cobalt and the ISO image:<pre>
-	<a href="ftp://ftp.netbsd.org/pub/NetBSD/NetBSD-5.0.1/cobalt/binary/kernel/netbsd-GENERIC.gz">ftp://ftp.netbsd.org/pub/NetBSD/NetBSD-5.0.1/cobalt/binary/kernel/netbsd-GENERIC.gz</a>
-	<a href="ftp://ftp.netbsd.org/pub/NetBSD/iso/5.0.1/cobaltcd-5.0.1.iso">ftp://ftp.netbsd.org/pub/NetBSD/iso/5.0.1/cobaltcd-5.0.1.iso</a>
+	<a href="ftp://ftp.netbsd.org/pub/NetBSD/NetBSD-5.1.1/cobalt/binary/kernel/netbsd-GENERIC.gz">ftp://ftp.netbsd.org/pub/NetBSD/NetBSD-5.1.1/cobalt/binary/kernel/netbsd-GENERIC.gz</a>
+	<a href="ftp://ftp.netbsd.org/pub/NetBSD/iso/5.1.1/cobaltcd-5.1.1.iso">ftp://ftp.netbsd.org/pub/NetBSD/iso/5.1.1/cobaltcd-5.1.1.iso</a>
 
 </pre>
   <li>Start the installation like this:<pre>
-  	<b>gxemul -x -E cobalt -d nbsd_cobalt.img -d bd:cobaltcd-5.0.1.iso -j cobalt/binary/kernel/netbsd-RAMDISK</b>
+  	<b>gxemul -x -E cobalt -d nbsd_cobalt.img -d bd:cobaltcd-5.1.1.iso -j cobalt/binary/kernel/netbsd-RAMDISK</b>
 
 </pre>
 	and proceed like you would do if you were installing NetBSD on a real
@@ -1658,6 +1662,8 @@ in GXemul.
 
 <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
 <a href="20081103-openbsd-landisk.png"><img src="20081103-openbsd-landisk-small.png"></a>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+<a href="20131109-openbsd_landisk.png"><img src="20131109-openbsd_landisk-small.jpg"></a>
 
 <p>To install OpenBSD/landisk onto an emulated harddisk image,
 follow these instructions:
@@ -1670,9 +1676,9 @@ follow these instructions:
 
 </pre>
   <li>Download the entire landisk directory from the ftp server:<pre>
-	<b>wget -np -l 0 -r <a href="ftp://ftp.se.openbsd.org/pub/OpenBSD/4.9/landisk/">ftp://ftp.se.openbsd.org/pub/OpenBSD/4.9/landisk/</a></b>
-	<b>cp ftp.se.openbsd.org/pub/OpenBSD/4.9/landisk/bsd .</b>
-	<b>cp ftp.se.openbsd.org/pub/OpenBSD/4.9/landisk/bsd.rd .</b>
+	<b>wget -np -l 0 -r <a href="ftp://ftp.se.openbsd.org/pub/OpenBSD/5.4/landisk/">ftp://ftp.se.openbsd.org/pub/OpenBSD/5.4/landisk/</a></b>
+	<b>cp ftp.se.openbsd.org/pub/OpenBSD/5.4/landisk/bsd .</b>
+	<b>cp ftp.se.openbsd.org/pub/OpenBSD/5.4/landisk/bsd.rd .</b>
 
 </pre>
 	(Replace ftp.se.openbsd.org with a server closer to you, for
@@ -1682,12 +1688,12 @@ follow these instructions:
 	(I recommend using <tt>mkisofs</tt> for that purpose. If you don't
 	already have <tt>mkisofs</tt> installed on your system, you need
 	to install it in order to do this.)<pre>
-	<b>mkisofs -U -o openbsd_landisk_4.9.iso ftp.se.openbsd.org/pub/OpenBSD/</b>
+	<b>mkisofs -U -o openbsd_landisk_5.4.iso ftp.se.openbsd.org/pub/OpenBSD/</b>
 	<b>rm -rf ftp.se.openbsd.org</b>      <i># this directory is not needed anymore</i>
 
 </pre>
   <li>Start the emulator using this command line:<pre>
-	<b>gxemul -x -E landisk -d obsd_landisk.img -d d:openbsd_landisk_4.9.iso bsd.rd</b>
+	<b>gxemul -x -E landisk -d obsd_landisk.img -d d:openbsd_landisk_5.4.iso bsd.rd</b>
 
 </pre>
 	and proceed like you would do if you were installing OpenBSD
@@ -1705,7 +1711,7 @@ follow these instructions:
 	  <li>Location of sets = <b>disk</b>
 	  <li>Is the disk partition already mounted = <b>no</b>
 	  <li>Disk containing the install media = <b>wd1</b>
-	  <li>Pathname to the sets = <b>4.9/landisk</b>
+	  <li>Pathname to the sets = <b>5.4/landisk</b>
 	</ul>
 </ol>
 
@@ -1716,6 +1722,8 @@ boot from the disk image:
 	<b>gxemul -x -E landisk -d obsd_landisk.img bsd</b>
 
 </pre>
+
+<p>Note: Generating ssh keys on the first bootup is extremely time consuming.
 
 <p>As with most emulation modes in GXemul, the NIC in this machine is 
 not emulated yet. If you want to transfer files to/from the emulated 
@@ -1768,7 +1776,7 @@ instructions:
 </pre>
 
   <li>Start the emulator using this command line:<pre>
-	<b>gxemul -e mvme187 -d obsd_mvme88k.img -d b:openbsd_mvme88k_4.5.iso -j 4.5/mvme88k/bsd.rd</b>
+	<b>gxemul -e mvme187old -d obsd_mvme88k.img -d b:openbsd_mvme88k_4.5.iso -j 4.5/mvme88k/bsd.rd</b>
 
 </pre>
 	and proceed like you would do if you were installing OpenBSD
@@ -1947,7 +1955,7 @@ instructions:
 Once the install has finished, the following command should let you 
 boot from the harddisk image:
 <pre>
-	<b>gxemul -e mvme187 -d obsd_mvme88k.img bsd</b>
+	<b>gxemul -e mvme187old -d obsd_mvme88k.img bsd</b>
 </pre>
 
 <p>When asked about root disk, enter <tt><b>sd0</b></tt>.

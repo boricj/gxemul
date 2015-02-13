@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2006-2011  Anders Gavare.  All rights reserved.
+ *  Copyright (C) 2006-2014  Anders Gavare.  All rights reserved.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions are met:
@@ -29,7 +29,8 @@
  *
  *  Implemented by reading http://www.ludd.luth.se/~jlo/dc/powervr-reg.txt and
  *  http://mc.pp.se/dc/pvr.html, source code of various demos and KalistOS,
- *  and doing a lot of guessing.
+ *  attempting to run the PROM from my own Dreamcast, and doing a lot of
+ *  guessing.
  *
  *  TODO: Almost everything
  *
@@ -38,7 +39,6 @@
  *	x)  Lots of work on the 3D "Tile Accelerator" engine.
  *		Recognize commands and turn into OpenGL or similar
  *		commands on the host?
- *		Color clipping.
  *		Wire-frame when running on a host without XGL?
  *
  *  Multiple lists of various kinds (6?).
@@ -47,6 +47,8 @@
  *  Real Rendering, using OpenGL if possible.
  *  Tile bins... with 6 pointers for each tile (?)
  *  PVR DMA.
+ *  Textures.
+ *  ...
  */
 
 #include <stdio.h>
@@ -66,8 +68,10 @@
 #include "thirdparty/dreamcast_sysasicvar.h"
 
 
-// #define	TA_DEBUG
-// #define debug fatal
+/* For debugging: */
+//#define DEBUG_RENDER_AS_WIRE_FRAME	// Renders 3-corner textured polygons as wire-frame
+//#define	TA_DEBUG		// Dumps TA commands
+//#define debug fatal			// Dumps debug even without -v.
 
 #define	INTERNAL_FB_ADDR	0x300000000ULL
 #define	PVR_FB_TICK_SHIFT	18
@@ -88,22 +92,6 @@
 #define	PVR_LMMODE0		0x84  
 #define	PVR_LMMODE1		0x88
 
-// An expanded (more easily read) variant of all the rendering commands.
-struct pvr_drawing_command {
-	int		cmd;
-	uint32_t	texture;
-	int		texture_xsize;
-	int		texture_ysize;
-
-	// float would be enough for most of this, I guess.
-	double		x;
-	double		y;
-	double		z;
-	double		u;
-	double		v;
-	double		extra1;
-	double		extra2;
-};
 
 struct pvr_data {
 	struct vfb_data		*fb;
@@ -144,18 +132,18 @@ struct pvr_data {
 	int			tilebuf_xsize;
 	int			tilebuf_ysize;
 
-	/*  Tile Accelerator Command:  */
+	/*  Current Tile Accelerator Command (64 bytes):  */
 	uint32_t		ta[64 / sizeof(uint32_t)];
 
-	/*  GXemul's own variant of the rendering commands:  */
+	/*  Stored list of TA commands:  */
 	int			current_list_type;
-	struct pvr_drawing_command *drawing_commands;
-	size_t			allocated_drawing_commands;
-	size_t			n_drawing_commands;
-	double			*vram_z;
+	uint32_t		*ta_commands;
+	size_t			allocated_ta_commands;
+	size_t			n_ta_commands;
 
-	/*  Video RAM:  */
+	/*  Video RAM and Z information:  */
 	uint8_t			*vram;
+	double			*vram_z;
 
 	/*  DMA registers:  */
 	uint32_t		dma_reg[N_PVR_DMA_REGS];
@@ -250,8 +238,8 @@ void pvr_dma_transfer(struct cpu *cpu, struct pvr_data *d)
 		dar = d->dma_reg[PVR_ADDR / sizeof(uint32_t)];
 
 		if (dar != 0x10000000) {
-			fatal("[ NOTE: DMA to non-TA: dar=%08x (delta %i), sar=%08x (delta %i) ]\n",
-			    (int)dar, (int)dst_delta, (int)sar, (int)src_delta);
+			//fatal("[ NOTE: DMA to non-TA: dar=%08x (delta %i), sar=%08x (delta %i) ]\n",
+			//    (int)dar, (int)dst_delta, (int)sar, (int)src_delta);
 			dar = 0x04000000 | (dar & 0x007fffff);
 			if (dst_delta == 0)
 				dst_delta = src_delta;
@@ -554,12 +542,8 @@ static void pvr_vblank_timer_tick(struct timer *t, void *extra)
  */
 void pvr_geometry_updated(struct pvr_data *d)
 {
-	/*  Scrap Z buffer if we have one.  */
-	if (d->vram_z == NULL) {
-		free(d->vram_z);
-		d->vram_z = NULL;
-	}
-		
+	int old_xsize = d->xsize, old_ysize = d->ysize, oldbpp = d->bytes_per_pixel;
+
 	/*  Make sure to redraw border on geometry changes.  */
 	d->border_updated = 1;
 
@@ -585,6 +569,19 @@ void pvr_geometry_updated(struct pvr_data *d)
 	if (d->line_double)
 		d->ysize /= 2;
 
+	bool settingsChanged = d->xsize != old_xsize ||
+	    d->ysize != old_ysize ||
+	    d->bytes_per_pixel != oldbpp;
+
+	if (!settingsChanged)
+		return;
+
+	/*  Scrap Z buffer if we have one.  */
+	if (d->vram_z == NULL) {
+		free(d->vram_z);
+		d->vram_z = NULL;
+	}
+		
 	/*  Only show geometry debug message if output is enabled:  */
 	if (!d->video_enabled || !d->display_enabled)
 		return;
@@ -602,6 +599,7 @@ void pvr_geometry_updated(struct pvr_data *d)
 }
 
 
+#ifdef DEBUG_RENDER_AS_WIRE_FRAME
 /*  Ugly quick-hack:  */
 static void line(struct pvr_data *d, int x1, int y1, int x2, int y2)
 {
@@ -618,70 +616,268 @@ static void line(struct pvr_data *d, int x1, int y1, int x2, int y2)
 		}
 	}
 }
+#endif
+
 
 // Ugly quick-hack z-buffer line drawer, for triangles.
 // Assumes 16-bit color.
 static void simpleline(struct pvr_data *d, int y, double x1, double x2,
-	double z1, double z2, int color)
+	double z1, double z2, double r1, double r2, double g1, double g2,
+	double b1, double b2)
 {
+	if (y < 0 || y >= d->ysize || (x1 < 0 && x2 < 0)
+	     || (x1 >= d->xsize && x2 >= d->xsize))
+		return;
+
 	int fb_base = REG(PVRREG_FB_RENDER_ADDR1);
 	if (x1 > x2) {
 		double tmpf = x1; x1 = x2; x2 = tmpf;
 		tmpf = z1; z1 = z2; z2 = tmpf;
+		tmpf = r1; r1 = r2; r2 = tmpf;
+		tmpf = g1; g1 = g2; g2 = tmpf;
+		tmpf = b1; b1 = b2; b2 = tmpf;
 	}
 	
 	double dz12 = (x2 - x1 != 0) ? ( (double)(z2 - z1) / (double)(x2 - x1) ) : 0;
-	double z = z1;
+	double dr12 = (x2 - x1 != 0) ? ( (double)(r2 - r1) / (double)(x2 - x1) ) : 0;
+	double dg12 = (x2 - x1 != 0) ? ( (double)(g2 - g1) / (double)(x2 - x1) ) : 0;
+	double db12 = (x2 - x1 != 0) ? ( (double)(b2 - b1) / (double)(x2 - x1) ) : 0;
+	double z = z1, r = r1, g = g1, b = b1;
 	for (int x = x1; x <= x2; ++x) {
-		if (x > 0 && y > 0 && x < d->xsize && y < d->ysize) {
+		if (x > 0 && x < d->xsize) {
 			int ofs = x + y * d->xsize;
-			if (d->vram_z[ofs] > z)
-				continue;
+			if (d->vram_z[ofs] <= z) {
+				d->vram_z[ofs] = z;
 
-			d->vram_z[ofs] = z;
+				// NOTE/TODO: Hardcoded for 565 pixelformat.
+				int ri = r, gi = g, bi = b;
+				if (ri < 0) ri = 0; if (ri > 255) ri = 255;
+				if (gi < 0) gi = 0; if (gi > 255) gi = 255;
+				if (bi < 0) bi = 0; if (bi > 255) bi = 255;
+				int color = ((ri >> 3) << 11) + ((gi >> 2) << 5) + (bi >> 3);
 
-			int fbofs = fb_base + ofs * d->bytes_per_pixel;
-			d->vram[(fbofs+0) % VRAM_SIZE] = color & 255;
-			d->vram[(fbofs+1) % VRAM_SIZE] = color >> 8;
+				int fbofs = fb_base + ofs * d->bytes_per_pixel;
+				d->vram[(fbofs+0) % VRAM_SIZE] = color & 255;
+				d->vram[(fbofs+1) % VRAM_SIZE] = color >> 8;
+			}
 		}
 		
-		z += dz12;
+		z += dz12; r += dr12; g += dg12; b += db12;
 	}
 }
 
-// Slow software rendering, for debugging:
-static void pvr_render_triangle(struct pvr_data *d,
-	int x1, int y1, double z1,
-	int x2, int y2, double z2,
-	int x3, int y3, double z3,
-	int flatcolor)
+static void texturedline(struct pvr_data *d,
+	int texture_pixelformat, bool twiddled, int stride,
+	int texture, int texture_xsize, int texture_ysize,
+	int y, int x1, int x2, double z1, double z2,
+	double u1, double u2, double v1, double v2)
 {
-	// Wire-frame test:
-	if (false) {
-		line(d, x1, y1, x2, y2);
-		line(d, x1, y1, x3, y3);
-		line(d, x2, y2, x3, y3);
+	if (y < 0 || y >= d->ysize || (x1 < 0 && x2 < 0)
+	     || (x1 >= d->xsize && x2 >= d->xsize))
 		return;
+
+	int fb_base = REG(PVRREG_FB_RENDER_ADDR1);
+	if (x1 > x2) {
+		int tmp = x1; x1 = x2; x2 = tmp;
+		double tmpf = z1; z1 = z2; z2 = tmpf;
+		tmpf = u1; u1 = u2; u2 = tmpf;
+		tmpf = v1; v1 = v2; v2 = tmpf;
 	}
 
+	int bytesperpixel = 2;
+
+	switch (texture_pixelformat)
+	{
+	case 0:	// ARGB1555
+	case 1:	// RGB565
+	case 2: // ARGB4444
+		bytesperpixel = 2;
+		break;
+	case 6:	// 8-bit palette
+		bytesperpixel = 1;
+		break;
+	default:
+		// TODO
+		break;
+	}
+
+	int palette_cfg = d->reg[PVRREG_PALETTE_CFG / sizeof(uint32_t)] & PVR_PALETTE_CFG_MODE_MASK;
+
+	double dz12 = (x2 - x1 != 0) ? ( (double)(z2 - z1) / (double)(x2 - x1) ) : 0;
+	double du12 = (x2 - x1 != 0) ? ( (double)(u2 - u1) / (double)(x2 - x1) ) : 0;
+	double dv12 = (x2 - x1 != 0) ? ( (double)(v2 - v1) / (double)(x2 - x1) ) : 0;
+
+	double z = z1, u = u1, v = v1;
+
+	for (int x = x1; x <= x2; ++x) {
+		if (x > 0 && x < d->xsize) {
+			int ofs = x + y * d->xsize;
+			if (d->vram_z[ofs] <= z) {
+				d->vram_z[ofs] = z;
+
+				int fbofs = fb_base + ofs * d->bytes_per_pixel;
+
+				// Get color from texture:
+				int texturex = u * texture_xsize;
+				texturex &= (texture_xsize-1);
+				int texturey = v * texture_ysize;
+				texturey &= (texture_ysize-1);
+
+				int textureofs;
+				if (twiddled) {
+					texturex = 
+					(texturex&1)|((texturex&2)<<1)|((texturex&4)<<2)|((texturex&8)<<3)|((texturex&16)<<4)|
+					      ((texturex&32)<<5)|((texturex&64)<<6)|((texturex&128)<<7)|((texturex&256)<<8)|((texturex&512)<<9);
+					texturey = 
+					(texturey&1)|((texturey&2)<<1)|((texturey&4)<<2)|((texturey&8)<<3)|((texturey&16)<<4)|
+					      ((texturey&32)<<5)|((texturey&64)<<6)|((texturey&128)<<7)|((texturey&256)<<8)|((texturey&512)<<9);
+					textureofs = texturex * 2 + texturey;
+				} else {
+					if (stride > 0)
+						textureofs = texturex + texturey * stride;
+					else
+						textureofs = texturex + texturey * texture_xsize;
+				}
+
+				textureofs *= bytesperpixel;	// 2 bytes per pixel.
+
+				int addr = texture + textureofs;
+				addr = ((addr & 4) << 20) | (addr & 3) | ((addr & 0x7ffff8) >> 1);
+
+				int a = 255, r = 64, g = 64, b = 64;
+				switch (texture_pixelformat)
+				{
+				case 0:	// ARGB1555:
+					{
+						int color = d->vram[addr] + (d->vram[addr+1] << 8);
+						a = (color >> 15) & 0x1 ? 255 : 0;
+						r = (color >> 10) & 0x1f;
+						g = ((color >> 5) & 0x1f) << 1;
+						b = (color) & 0x1f;
+					}
+					break;
+				case 1:	// RGB565:
+					{
+						int color = d->vram[addr] + (d->vram[addr+1] << 8);
+						r = (color >> 11) & 0x1f;
+						g = (color >> 5) & 0x3f;
+						b = (color) & 0x1f;
+					}
+					break;
+				case 2:	// ARGB4444:
+					{
+						int color = d->vram[addr] + (d->vram[addr+1] << 8);
+						a = ((color >> 12) & 15) * 0x11;
+						r = ((color >> 8) & 15) << 1;
+						g = ((color >> 4) & 15) << 2;
+						b = ((color) & 15) << 1;
+					}
+					break;
+				case 6:
+					{
+						// TODO: multiple palette banks?
+						int index8bpp = d->vram[addr];
+						char* base = (char*)&d->reg[PVRREG_PALETTE / sizeof(uint32_t)];
+						uint16_t c16 = *((uint16_t*)base + index8bpp);
+						uint16_t c32 = *((uint32_t*)base + index8bpp);
+						switch (palette_cfg) {
+						case PVR_PALETTE_CFG_MODE_ARGB1555:
+							a = (c16 >> 15) & 0x1 ? 255 : 0;
+							r = (c16 >> 10) & 0x1f;
+							g = ((c16 >> 5) & 0x1f) << 1;
+							b = (c16) & 0x1f;
+							break;
+						case PVR_PALETTE_CFG_MODE_RGB565:
+							r = (c16 >> 11) & 0x1f;
+							g = (c16 >> 5) & 0x3f;
+							b = (c16) & 0x1f;
+							break;
+						case PVR_PALETTE_CFG_MODE_ARGB4444:
+							a = ((c16 >> 12) & 15) * 0x11;
+							r = ((c16 >> 8) & 15) << 1;
+							g = ((c16 >> 4) & 15) << 2;
+							b = ((c16) & 15) << 1;
+							break;
+						case PVR_PALETTE_CFG_MODE_ARGB8888:
+							a = (c32 >> 24) & 255;
+							r = ((c32 >> 16) & 255) >> 3;
+							g = ((c32 >> 8) & 255) >> 2;
+							b = ((c32) & 255) >> 3;
+							break;
+						}
+					}
+					break;
+				default:
+					fatal("pvr: unimplemented texture_pixelformat %i\n", texture_pixelformat);
+					exit(1);
+				}
+
+				if (a == 255)
+				{
+					// Output as RGB565:
+					// TODO: Support other formats.
+					int color = (r << 11) + (g << 5) + (b);
+					d->vram[(fbofs+0) % VRAM_SIZE] = color & 255;
+					d->vram[(fbofs+1) % VRAM_SIZE] = color >> 8;
+				} else if (a > 0) {
+					int oldcolor = d->vram[(fbofs+0) % VRAM_SIZE];
+					oldcolor += (d->vram[(fbofs+1) % VRAM_SIZE] << 8);
+					int oldr = (oldcolor >> 11) & 0x1f;
+					int oldg = (oldcolor >> 5) & 0x3f;
+					int oldb = (oldcolor) & 0x1f;
+					r = (a * r + oldr * (255 - a)) / 255;
+					g = (a * g + oldg * (255 - a)) / 255;
+					b = (a * b + oldb * (255 - a)) / 255;
+					int color = (r << 11) + (g << 5) + (b);
+					d->vram[(fbofs+0) % VRAM_SIZE] = color & 255;
+					d->vram[(fbofs+1) % VRAM_SIZE] = color >> 8;
+				}
+			}
+		}
+		
+		z += dz12;
+		u += du12;
+		v += dv12;
+	}
+}
+
+
+// Slow software rendering, for debugging:
+static void pvr_render_triangle(struct pvr_data *d,
+	int x1, int y1, double z1, int r1, int g1, int b1,
+	int x2, int y2, double z2, int r2, int g2, int b2,
+	int x3, int y3, double z3, int r3, int g3, int b3)
+{
 	// Easiest if 1, 2, 3 are in order top to bottom.
 	if (y2 < y1) {
 		int tmp = x1; x1 = x2; x2 = tmp;
 		tmp = y1; y1 = y2; y2 = tmp;
+		tmp = r1; r1 = r2; r2 = tmp;
+		tmp = g1; g1 = g2; g2 = tmp;
+		tmp = b1; b1 = b2; b2 = tmp;
 		double tmpf = z1; z1 = z2; z2 = tmpf;
 	}
 
 	if (y3 < y1) {
 		int tmp = x1; x1 = x3; x3 = tmp;
 		tmp = y1; y1 = y3; y3 = tmp;
+		tmp = r1; r1 = r3; r3 = tmp;
+		tmp = g1; g1 = g3; g3 = tmp;
+		tmp = b1; b1 = b3; b3 = tmp;
 		double tmpf = z1; z1 = z3; z3 = tmpf;
 	}
 
 	if (y3 < y2) {
 		int tmp = x2; x2 = x3; x3 = tmp;
 		tmp = y2; y2 = y3; y3 = tmp;
+		tmp = r2; r2 = r3; r3 = tmp;
+		tmp = g2; g2 = g3; g3 = tmp;
+		tmp = b2; b2 = b3; b3 = tmp;
 		double tmpf = z2; z2 = z3; z3 = tmpf;
 	}
+
+	if (y3 < 0 || y1 >= d->ysize)
+		return;
 
 	double dx12 = (y2-y1 != 0) ? ( (x2 - x1) / (double)(y2 - y1) ) : 0.0;
 	double dx13 = (y3-y1 != 0) ? ( (x3 - x1) / (double)(y3 - y1) ) : 0.0;
@@ -691,87 +887,126 @@ static void pvr_render_triangle(struct pvr_data *d,
 	double dz13 = (y3-y1 != 0) ? ( (z3 - z1) / (double)(y3 - y1) ) : 0.0;
 	double dz23 = (y3-y2 != 0) ? ( (z3 - z2) / (double)(y3 - y2) ) : 0.0;
 
-	double startx = x1, startz = z1;
-	double stopx = x1, stopz = z1;
+	double dr12 = (y2-y1 != 0) ? ( (r2 - r1) / (double)(y2 - y1) ) : 0.0;
+	double dr13 = (y3-y1 != 0) ? ( (r3 - r1) / (double)(y3 - y1) ) : 0.0;
+	double dr23 = (y3-y2 != 0) ? ( (r3 - r2) / (double)(y3 - y2) ) : 0.0;
+
+	double dg12 = (y2-y1 != 0) ? ( (g2 - g1) / (double)(y2 - y1) ) : 0.0;
+	double dg13 = (y3-y1 != 0) ? ( (g3 - g1) / (double)(y3 - y1) ) : 0.0;
+	double dg23 = (y3-y2 != 0) ? ( (g3 - g2) / (double)(y3 - y2) ) : 0.0;
+
+	double db12 = (y2-y1 != 0) ? ( (b2 - b1) / (double)(y2 - y1) ) : 0.0;
+	double db13 = (y3-y1 != 0) ? ( (b3 - b1) / (double)(y3 - y1) ) : 0.0;
+	double db23 = (y3-y2 != 0) ? ( (b3 - b2) / (double)(y3 - y2) ) : 0.0;
+
+	double startx = x1, startz = z1, startr = r1, startg = g1, startb = b1;
+	double stopx = x1, stopz = z1, stopr = r1, stopg = g1, stopb = b1;
 	for (int y = y1; y < y2; ++y)
 	{
-		simpleline(d, y, startx, stopx, startz, stopz, flatcolor);
-		startx += dx13; startz += dz13;
-		stopx += dx12; stopz += dz12;
+		simpleline(d, y, startx, stopx, startz, stopz, startr, stopr, startg, stopg, startb, stopb);
+		startx += dx13; startz += dz13; startr += dr13; startg += dg13; startb += db13;
+		stopx += dx12; stopz += dz12; stopr += dr12; stopg += dg12; stopb += db12;
 	}
 
-	stopx = x2; stopz = z2;
+	stopx = x2; stopz = z2; stopr = r2; stopg = g2; stopb = b2;
 	for (int y = y2; y < y3; ++y)
 	{
-		simpleline(d, y, startx, stopx, startz, stopz, flatcolor);
-		startx += dx13; startz += dz13;
-		stopx += dx23; stopz += dz23;
+		simpleline(d, y, startx, stopx, startz, stopz, startr, stopr, startg, stopg, startb, stopb);
+		startx += dx13; startz += dz13; startr += dr13; startg += dg13; startb += db13;
+		stopx += dx23; stopz += dz23; stopr += dr23; stopg += dg23; stopb += db23;
 	}
+
+#ifdef DEBUG_RENDER_AS_WIRE_FRAME
+	// Wire-frame test:
+	line(d, x1, y1, x2, y2);
+	line(d, x1, y1, x3, y3);
+	line(d, x2, y2, x3, y3);
+#endif
 }
 
 
 // Slow software rendering, for debugging:
-static void pvr_render_texture(struct pvr_data *d, int* wf_x, int* wf_y, double* wf_z, int flatcolor)
+static void pvr_render_triangle_textured(struct pvr_data *d,
+	int texture_pixelformat, bool twiddled, int stride,
+	int texture, int texture_xsize, int texture_ysize,
+	int x1, int y1, double z1, double u1, double v1,
+	int x2, int y2, double z2, double u2, double v2,
+	int x3, int y3, double z3, double u3, double v3)
 {
-	// Wire-frame test:
-	if (false) {
-		line(d, wf_x[0], wf_y[0], wf_x[1], wf_y[1]);
-		line(d, wf_x[0], wf_y[0], wf_x[2], wf_y[2]);
-		line(d, wf_x[1], wf_y[1], wf_x[3], wf_y[3]);
-		line(d, wf_x[2], wf_y[2], wf_x[3], wf_y[3]);
+	// Easiest if 1, 2, 3 are in order top to bottom.
+	if (y2 < y1) {
+		int tmp = x1; x1 = x2; x2 = tmp;
+		tmp = y1; y1 = y2; y2 = tmp;
+		double tmpf = z1; z1 = z2; z2 = tmpf;
+		tmpf = u1; u1 = u2; u2 = tmpf;
+		tmpf = v1; v1 = v2; v2 = tmpf;
+	}
+
+	if (y3 < y1) {
+		int tmp = x1; x1 = x3; x3 = tmp;
+		tmp = y1; y1 = y3; y3 = tmp;
+		double tmpf = z1; z1 = z3; z3 = tmpf;
+		tmpf = u1; u1 = u3; u3 = tmpf;
+		tmpf = v1; v1 = v3; v3 = tmpf;
+	}
+
+	if (y3 < y2) {
+		int tmp = x2; x2 = x3; x3 = tmp;
+		tmp = y2; y2 = y3; y3 = tmp;
+		double tmpf = z2; z2 = z3; z3 = tmpf;
+		tmpf = u2; u2 = u3; u3 = tmpf;
+		tmpf = v2; v2 = v3; v3 = tmpf;
+	}
+
+	if (y3 < 0 || y1 >= d->ysize)
 		return;
+
+	double dx12 = (y2-y1 != 0) ? ( (x2 - x1) / (double)(y2 - y1) ) : 0.0;
+	double dx13 = (y3-y1 != 0) ? ( (x3 - x1) / (double)(y3 - y1) ) : 0.0;
+	double dx23 = (y3-y2 != 0) ? ( (x3 - x2) / (double)(y3 - y2) ) : 0.0;
+
+	double dz12 = (y2-y1 != 0) ? ( (z2 - z1) / (double)(y2 - y1) ) : 0.0;
+	double dz13 = (y3-y1 != 0) ? ( (z3 - z1) / (double)(y3 - y1) ) : 0.0;
+	double dz23 = (y3-y2 != 0) ? ( (z3 - z2) / (double)(y3 - y2) ) : 0.0;
+
+	double du12 = (y2-y1 != 0) ? ( (u2 - u1) / (double)(y2 - y1) ) : 0.0;
+	double du13 = (y3-y1 != 0) ? ( (u3 - u1) / (double)(y3 - y1) ) : 0.0;
+	double du23 = (y3-y2 != 0) ? ( (u3 - u2) / (double)(y3 - y2) ) : 0.0;
+
+	double dv12 = (y2-y1 != 0) ? ( (v2 - v1) / (double)(y2 - y1) ) : 0.0;
+	double dv13 = (y3-y1 != 0) ? ( (v3 - v1) / (double)(y3 - y1) ) : 0.0;
+	double dv23 = (y3-y2 != 0) ? ( (v3 - v2) / (double)(y3 - y2) ) : 0.0;
+
+	double startx = x1, startz = z1, startu = u1, startv = v1;
+	double stopx = x1, stopz = z1, stopu = u1, stopv = v1;
+
+	for (int y = y1; y < y2; ++y)
+	{
+		texturedline(d, texture_pixelformat, twiddled, stride, texture, texture_xsize, texture_ysize, y, startx, stopx, startz, stopz, startu, stopu, startv, stopv);
+		startx += dx13; startz += dz13; startu += du13; startv += dv13;
+		stopx += dx12; stopz += dz12; stopu += du12; stopv += dv12;
 	}
 
-	// Render as two triangles:
-	pvr_render_triangle(d,
-	    wf_x[0], wf_y[0], wf_z[0],
-	    wf_x[1], wf_y[1], wf_z[1],
-	    wf_x[2], wf_y[2], wf_z[2], flatcolor);
-	pvr_render_triangle(d,
-	    wf_x[1], wf_y[1], wf_z[1],
-	    wf_x[2], wf_y[2], wf_z[2],
-	    wf_x[3], wf_y[3], wf_z[3], flatcolor);
+	stopx = x2; stopz = z2; stopu = u2; stopv = v2;
+	for (int y = y2; y < y3; ++y)
+	{
+		texturedline(d, texture_pixelformat, twiddled, stride, texture, texture_xsize, texture_ysize, y, startx, stopx, startz, stopz, startu, stopu, startv, stopv);
+		startx += dx13; startz += dz13; startu += du13; startv += dv13;
+		stopx += dx23; stopz += dz23; stopu += du23; stopv += dv23;
+	}
+
+#ifdef DEBUG_RENDER_AS_WIRE_FRAME
+	// Wire-frame test:
+	line(d, x1, y1, x2, y2);
+	line(d, x1, y1, x3, y3);
+	line(d, x2, y2, x3, y3);
+#endif
 }
 
 
-static void pvr_clear_drawing_commands(struct pvr_data* d)
+static void pvr_clear_ta_commands(struct pvr_data* d)
 {
-	d->n_drawing_commands = 0;
-}
-
-
-static void pvr_add_drawing_command(struct pvr_data* d, int cmd, uint32_t texture,
-	int texture_xsize, int texture_ysize,
-	double x, double y, double z, double u, double v, double extra1, double extra2)
-{
-	if (d->drawing_commands == NULL) {
-		d->allocated_drawing_commands = 10000;
-		d->drawing_commands = (struct pvr_drawing_command *)
-		    malloc(sizeof(struct pvr_drawing_command)
-		    * d->allocated_drawing_commands);
-		d->n_drawing_commands = 0;
-	}
-
-	if (d->n_drawing_commands + 1 >= d->allocated_drawing_commands) {
-		d->allocated_drawing_commands *= 2;
-		d->drawing_commands = (struct pvr_drawing_command *)
-		    realloc(d->drawing_commands, sizeof
-		    (struct pvr_drawing_command) * d->allocated_drawing_commands);
-	}
-
-	d->drawing_commands[d->n_drawing_commands].cmd = cmd;
-	d->drawing_commands[d->n_drawing_commands].texture = texture;
-	d->drawing_commands[d->n_drawing_commands].texture_xsize = texture_xsize;
-	d->drawing_commands[d->n_drawing_commands].texture_ysize = texture_ysize;
-	d->drawing_commands[d->n_drawing_commands].x = x;
-	d->drawing_commands[d->n_drawing_commands].y = y;
-	d->drawing_commands[d->n_drawing_commands].z = z;
-	d->drawing_commands[d->n_drawing_commands].u = u;
-	d->drawing_commands[d->n_drawing_commands].v = v;
-	d->drawing_commands[d->n_drawing_commands].extra1 = extra1;
-	d->drawing_commands[d->n_drawing_commands].extra2 = extra2;
-
-	d->n_drawing_commands ++;
+	d->n_ta_commands = 0;
 }
 
 
@@ -785,85 +1020,328 @@ static void pvr_add_drawing_command(struct pvr_data* d, int cmd, uint32_t textur
  */
 void pvr_render(struct cpu *cpu, struct pvr_data *d)
 {
+	int fb_render_cfg = REG(PVRREG_FB_RENDER_CFG);
 	int fb_base = REG(PVRREG_FB_RENDER_ADDR1);
-	int wf_point_nr, texture = 0;
-	int flatcolor = 0xf978;
-	int wf_x[4], wf_y[4]; double wf_z[4];
 
-	debug("[ pvr_render: rendering to FB offset 0x%x ]\n", fb_base);
+	if ((fb_render_cfg & FB_RENDER_CFG_RENDER_MODE_MASK) != 0x1) {
+		printf("pvr: only RGB565 rendering has been implemented\n");
+		exit(1);
+	}
 
-	/*  Clear all pixels first. TODO: Maybe only clear specific tiles?  */
-	memset(d->vram + fb_base, 0, d->xsize * d->ysize * d->bytes_per_pixel);
+	// Settings for the current polygon being rendered:
+	// Word 0:
+	int listtype = 0;
+	int striplength = 0;
+	int clipmode;
+	int modifier;
+	int modifier_mode;
+	int color_type = 0;
+	bool texture = false;
+	bool specular;
+	bool shading;
+	bool uv_format;
+
+	// Word 1:
+	int depthmode;
+	int cullingmode = 0;
+	bool zwrite;
+	bool texture1;
+	bool specular1;
+	bool shading1;
+	bool uv_format1;
+	bool dcalcexact;
+
+	// Word 2:
+	int texture_usize = 0, texture_vsize = 0;
+
+	// Word 3:
+	bool texture_mipmap = false;
+	bool texture_vq_compression = false;
+	int texture_pixelformat = 0;
+	bool texture_twiddled = false;
+	bool texture_stride = false;
+	uint32_t textureAddr = 0;
+
+	int vertex_index = 0;
+	int wf_x[4], wf_y[4]; double wf_z[4], wf_u[4], wf_v[4];
+	int wf_r[4], wf_g[4], wf_b[4];
+
+	double baseRed = 0.0, baseGreen = 0.0, baseBlue = 0.0;
+
+	debug("[ pvr_render: rendering to FB offset 0x%x, "
+	    "%i Tile Accelerator commands ]\n", fb_base, d->n_ta_commands);
+
+	/*
+	 *  Clear all pixels first.
+	 *  TODO: Maybe only clear the specific tiles that are in use by
+	 *  the tile accelerator?
+	 *  TODO: What background color to use? See KOS' pvr_misc.c for
+	 *  how KOS sets the background.
+	 */
+	memset(d->vram + fb_base, 0x00, d->xsize * d->ysize * d->bytes_per_pixel);
 
 	/*  Clear Z as well:  */
 	if (d->vram_z == NULL) {
 		d->vram_z = (double*) malloc(sizeof(double) * d->xsize * d->ysize);
 	}
 
-	memset(d->vram_z, 0, sizeof(double) * d->xsize * d->ysize);
+	uint32_t bgplaneZ = REG(PVRREG_BGPLANE_Z);
+	struct ieee_float_value backgroundz;
+	ieee_interpret_float_value(bgplaneZ, &backgroundz, IEEE_FMT_S);
+	for (int q = 0; q < d->xsize * d->ysize; ++q)
+		d->vram_z[q] = backgroundz.f;
 
-	wf_point_nr = 0;
+	// Using names from http://www.ludd.luth.se/~jlo/dc/ta-intro.txt.
+	for (size_t index = 0; index < d->n_ta_commands; ++index) {
+		// list points to 8 or 16 words.
+		uint32_t* list = &d->ta_commands[index * 16];
+		int cmd = (list[0] >> 29) & 7;
 
-	for (size_t index = 0; index < d->n_drawing_commands; ++index) {
-		struct pvr_drawing_command* command = &d->drawing_commands[index];
-
-		switch (command->cmd)
+		switch (cmd)
 		{
-		case 0:	// end of list
+		case 0:	// END_OF_LIST
+			// Interrupt event already triggered in pvr_ta_command().
+#ifdef TA_DEBUG
+			fatal("\nTA end_of_list (list type %i)\n", d->current_list_type);
+#endif
 			break;
 
-		case 1:	// vertex
-		case 2:	// closing vertex
-			wf_x[wf_point_nr] = command->x;
-			wf_y[wf_point_nr] = command->y;
-			wf_z[wf_point_nr] = command->z;
-			wf_point_nr ++;
+		case 1:	// USER_CLIP
+			// TODO: Ignoring for now.
+			break;
 
-			if (wf_point_nr == 4) {
-				pvr_render_texture(d, wf_x, wf_y, wf_z, flatcolor);
+		case 4:	// polygon or modifier volume
+		{
+			vertex_index = 0;
 
-				if (command->cmd == 1) {
-					// Not a closing vertex, then move points 2 and 3
-					// into slots 0 and 1, so that the stripe can continue.
-					wf_point_nr = 2;
-					wf_x[0] = wf_x[2]; wf_y[0] = wf_y[2]; wf_z[0] = wf_z[2];
-					wf_x[1] = wf_x[3]; wf_y[1] = wf_y[3]; wf_z[1] = wf_z[3];
+			// List Word 0:
+			listtype = (list[0] >> 24) & 7;
+			striplength = (list[0] >> 18) & 3;
+			striplength = striplength == 2 ? 4 : (
+			    striplength == 3 ? 6 : (striplength + 1));
+			clipmode = (list[0] >> 16) & 3;
+			modifier = (list[0] >> 7) & 1;
+			modifier_mode = (list[0] >> 6) & 1;
+			color_type = (list[0] >> 4) & 3;
+			texture = list[0] & 8;
+			specular = list[0] & 4;
+			shading = list[0] & 2;
+			uv_format = list[0] & 1;
+
+#ifdef TA_DEBUG
+			fatal("\nTA polygon  listtype %i, ", listtype);
+			fatal("striplength %i, ", striplength);
+			fatal("clipmode %i, ", clipmode);
+			fatal("modifier %i, ", modifier);
+			fatal("modifier_mode %i,\n", modifier_mode);
+			fatal("            color_type %i, ", color_type);
+			fatal("texture %s, ", texture ? "TRUE" : "false");
+			fatal("specular %s, ", specular ? "TRUE" : "false");
+			fatal("shading %s, ", shading ? "TRUE" : "false");
+			fatal("uv_format %s\n", uv_format ? "TRUE" : "false");
+#endif
+
+			// List Word 1:
+			depthmode = (list[1] >> 29) & 7;
+			cullingmode = (list[1] >> 27) & 3;
+			zwrite = ! ((list[1] >> 26) & 1);
+			texture1 = (list[1] >> 25) & 1;
+			specular1 = (list[1] >> 24) & 1;
+			shading1 = (list[1] >> 23) & 1;
+			uv_format1 = (list[1] >> 22) & 1;
+			dcalcexact = (list[1] >> 20) & 1;
+
+#ifdef TA_DEBUG
+			fatal("            depthmode %i, ", depthmode);
+			fatal("cullingmode %i, ", cullingmode);
+			fatal("zwrite %s, ", zwrite ? "TRUE" : "false");
+			fatal("texture1 %s\n", texture1 ? "TRUE" : "false");
+			fatal("            specular1 %s, ", specular1 ? "TRUE" : "false");
+			fatal("shading1 %s, ", shading1 ? "TRUE" : "false");
+			fatal("uv_format1 %s, ", uv_format1 ? "TRUE" : "false");
+			fatal("dcalcexact %s\n", dcalcexact ? "TRUE" : "false");
+#endif
+
+			if (!zwrite) {
+				fatal("pvr: no zwrite? not implemented yet.\n");
+				exit(1);
+			}
+
+			// For now, trust texture and ignore texture1.
+			// if (texture != texture1) {
+			//	fatal("pvr: texture != texture1. what to do?\n");
+			//	exit(1);
+			// }
+
+			// List Word 2:
+			// TODO: srcblend (31-29)
+			// TODO: dstblend (28-26)
+			// TODO: srcmode (25)
+			// TODO: dstmode (24)
+			// TODO: fog (23-22)
+			// TODO: clamp (21)
+			// TODO: alpha (20)
+			// TODO: texture alpha (19)
+			// TODO: uv flip (18-17)
+			// TODO: uv clamp (16-15)
+			// TODO: filter (14-12)
+			// TODO: mipmap (11-8)
+			// TODO: texture shading (7-6)
+			texture_usize = 8 << ((list[2] >> 3) & 7);
+			texture_vsize = 8 << (list[2] & 7);
+
+			// List Word 3:
+			texture_mipmap = (list[3] >> 31) & 1;
+			texture_vq_compression = (list[3] >> 30) & 1;
+			texture_pixelformat = (list[3] >> 27) & 7;
+			texture_twiddled = ! ((list[3] >> 26) & 1);
+			texture_stride = (list[3] >> 25) & 1;
+			textureAddr = (list[3] << 3) & 0x7fffff;
+
+#ifdef TA_DEBUG
+			fatal("            texture: mipmap %s, ", texture_mipmap ? "TRUE" : "false");
+			fatal("vq_compression %s, ", texture_vq_compression ? "TRUE" : "false");
+			fatal("pixelformat %i, ", texture_pixelformat);
+			fatal("twiddled %s\n", texture_twiddled ? "TRUE" : "false");
+			fatal("            stride %s, ", texture_stride ? "TRUE" : "false");
+			fatal("textureAddr 0x%08x\n", textureAddr);
+#endif
+
+			if (texture_vq_compression) {
+				fatal("pvr: texture_vq_compression not supported yet\n");
+				// exit(1);
+			}
+
+			struct ieee_float_value r, g, b;
+			ieee_interpret_float_value(list[5], &r, IEEE_FMT_S);
+			ieee_interpret_float_value(list[6], &g, IEEE_FMT_S);
+			ieee_interpret_float_value(list[7], &b, IEEE_FMT_S);
+			baseRed = r.f * 255;
+			baseGreen = g.f * 255;
+			baseBlue = b.f * 255;
+			// printf("rgb = %f %f %f\n", r.f, g.f, b.f);
+			break;
+		}
+
+		case 7:	// vertex
+		{
+			// MAJOR TODO:
+			// How to select which one of the 18 (!) types listed
+			// in http://www.ludd.luth.se/~jlo/dc/ta-intro.txt to
+			// use?
+			if (listtype != 0 && listtype != 2 && listtype != 4)
+				break;
+
+			bool eos = (list[0] >> 28) & 1;
+
+			struct ieee_float_value fx, fy, fz, u, v, extra1, extra2;
+			ieee_interpret_float_value(list[1], &fx, IEEE_FMT_S);
+			ieee_interpret_float_value(list[2], &fy, IEEE_FMT_S);
+			ieee_interpret_float_value(list[3], &fz, IEEE_FMT_S);
+			wf_x[vertex_index] = fx.f;
+			wf_y[vertex_index] = fy.f;
+			wf_z[vertex_index] = fz.f;
+
+#ifdef TA_DEBUG
+			fatal("TA vertex   %f %f %f%s\n", fx.f, fy.f, fz.f,
+				eos ? " end_of_strip" : "");
+#endif
+
+			if (texture) {
+				ieee_interpret_float_value(list[4], &u, IEEE_FMT_S);
+				ieee_interpret_float_value(list[5], &v, IEEE_FMT_S);
+				wf_u[vertex_index] = u.f;
+				wf_v[vertex_index] = v.f;
+			} else {
+				if (color_type == 0) {
+					wf_r[vertex_index] = (list[6] >> 16) & 255;
+					wf_g[vertex_index] = (list[6] >> 8) & 255;
+					wf_b[vertex_index] = (list[6]) & 255;
+				} else if (color_type == 1) {
+					ieee_interpret_float_value(list[5], &v, IEEE_FMT_S);
+					ieee_interpret_float_value(list[6], &extra1, IEEE_FMT_S);
+					ieee_interpret_float_value(list[7], &extra2, IEEE_FMT_S);
+					wf_r[vertex_index] = v.f * 255;
+					wf_g[vertex_index] = extra1.f * 255;
+					wf_b[vertex_index] = extra2.f * 255;
+				} else if (color_type == 2) {
+					ieee_interpret_float_value(list[6], &extra1, IEEE_FMT_S);
+					wf_r[vertex_index] = extra1.f * baseRed;
+					wf_g[vertex_index] = extra1.f * baseGreen;
+					wf_b[vertex_index] = extra1.f * baseBlue;
 				} else {
-					// Closing vertex. Change the color for the next stripe.
-					wf_point_nr = 0;
-					flatcolor = ((flatcolor * 0xf813) ^ 0xcc01) - 0xf928;
+					// "Intensity from previous face". TODO. Red for now.
+					wf_r[vertex_index] = 255;
+					wf_g[vertex_index] = 0;
+					wf_b[vertex_index] = 0;
+				}
+			}
+
+			vertex_index ++;
+
+			if (vertex_index >= 3) {
+				int modulo_mask = REG(PVRREG_TSP_CFG) & TSP_CFG_MODULO_MASK;
+
+				float crossProduct =
+					((wf_x[1] - wf_x[0])*(wf_y[2] - wf_y[0])) -
+					((wf_y[1] - wf_y[0])*(wf_x[2] - wf_x[0]));
+
+				// Hm. TODO: Instead of flipping back and forth between
+				// clockwise and counter-clockwise culling, perhaps there
+				// is some smarter way of assigning the three points
+				// instead of 012 => 12x...?
+				bool culled = false;
+				if (cullingmode == 2) {
+					if (crossProduct < 0)
+						culled = true;
+					cullingmode = 3;
+				} else if (cullingmode == 3) {
+					if (crossProduct > 0)
+						culled = true;
+					cullingmode = 2;
+				}
+
+				if (!culled) {
+					if (texture)
+						pvr_render_triangle_textured(d,
+						    texture_pixelformat, texture_twiddled, texture_stride ? (32*modulo_mask) : 0,
+						    textureAddr, texture_usize, texture_vsize,
+						    wf_x[0], wf_y[0], wf_z[0], wf_u[0], wf_v[0],
+						    wf_x[1], wf_y[1], wf_z[1], wf_u[1], wf_v[1],
+						    wf_x[2], wf_y[2], wf_z[2], wf_u[2], wf_v[2]);
+					else
+						pvr_render_triangle(d,
+						    wf_x[0], wf_y[0], wf_z[0], wf_r[0], wf_g[0], wf_b[0],
+						    wf_x[1], wf_y[1], wf_z[1], wf_r[1], wf_g[1], wf_b[1],
+						    wf_x[2], wf_y[2], wf_z[2], wf_r[2], wf_g[2], wf_b[2]);
+				}
+
+				if (eos) {
+					// End of strip.
+					vertex_index = 0;
+				} else {
+					// Not a closing vertex, then move points 1 and 2
+					// into slots 0 and 1, so that the stripe can continue.
+					vertex_index = 2;
+					wf_x[0] = wf_x[1]; wf_y[0] = wf_y[1]; wf_z[0] = wf_z[1];
+					wf_u[0] = wf_u[1]; wf_v[0] = wf_v[1];
+					wf_r[0] = wf_r[1]; wf_g[0] = wf_g[1]; wf_b[0] = wf_b[1];
+					
+					wf_x[1] = wf_x[2]; wf_y[1] = wf_y[2]; wf_z[1] = wf_z[2];
+					wf_u[1] = wf_u[2]; wf_v[1] = wf_v[2];
+					wf_r[1] = wf_r[2]; wf_g[1] = wf_g[2]; wf_b[1] = wf_b[2];
 				}
 			}
 			break;
-			
-		case 3:	// polygon or modifier volume:
-			wf_point_nr = 0;
-			texture = command->texture;
-			texture <<= 3;
-			texture &= 0x7fffff;
+		}
 
-			/* if (texture != 0) {
-				// NOTE: Maybe depends on "twiddle" bit in one of
-				// the TA command words.
-				fatal("PVR TEXTURE = 0x%08x\n", texture);
-				for (int i = 0; i < 500; ++i) {
-					int addr = texture + i;
-					addr = ((addr & 4) << 20) | (addr & 3) | ((addr & 0x7ffff8) >> 1);
-					fatal("%02x ", d->vram[addr+i]);
-				}
-				fatal("\n");
-			} */
-
-			flatcolor = ((flatcolor * 0xf813) ^ 0xcc01) - 0xf928;
-
-			break;
-			
 		default:
-			fatal("pvr_render: internal error, unknown cmd\n");
+			fatal("pvr_render: unimplemented list cmd %i\n", cmd);
+			exit(1);
 		}
 	}
 
-	pvr_clear_drawing_commands(d);
+	pvr_clear_ta_commands(d);
 	
 	// TODO: RENDERDONE is 2. How about other events?
 	SYSASIC_TRIGGER_EVENT(SYSASIC_EVENT_RENDERDONE);
@@ -878,7 +1356,7 @@ void pvr_render(struct cpu *cpu, struct pvr_data *d)
 static void pvr_reset_ta(struct pvr_data *d)
 {
 	REG(PVRREG_DIWCONF) = DIWCONF_MAGIC;
-	pvr_clear_drawing_commands(d);
+	pvr_clear_ta_commands(d);
 }
 
 
@@ -939,10 +1417,11 @@ static void pvr_tilebuf_debugdump(struct pvr_data *d)
 /*
  *  pvr_ta_command():
  *
- *  Read a command (e.g. parts of a polygon primitive) from d->ta[], and output
+ *  Someone has written a [complete] 32-byte or 64-byte command to the Tile
+ *  Accelerator memory area. The real hardware probably outputs
  *  "compiled commands" into the Object list and Object Pointer list.
- *
- *  TODO.
+ *  For now, just put all the commands in a plain array, and then later execute
+ *  them in pvr_render().
  */
 static void pvr_ta_command(struct cpu *cpu, struct pvr_data *d, int list_ofs)
 {
@@ -953,7 +1432,7 @@ static void pvr_ta_command(struct cpu *cpu, struct pvr_data *d, int list_ofs)
 	{
 		int i;
 		fatal("TA cmd:");
-		for (i=0; i<8; i++)
+		for (i = 0; i < 8; ++i)
 			fatal(" %08x", (int) ta[i]);
 		fatal("\n");
 	}
@@ -962,58 +1441,45 @@ static void pvr_ta_command(struct cpu *cpu, struct pvr_data *d, int list_ofs)
 	// ob_ofs = REG(PVRREG_TA_OB_POS);
 	// REG(PVRREG_TA_OB_POS) = ob_ofs + sizeof(uint64_t);
 
-	switch (ta[0] >> 29) {
-	case 4:	// polygon or modifier volume
-		{
-			bool useTexture = ta[0] & 8;
-			uint32_t texture = ta[3];
-			int texture_usize = 8 << ((ta[2] >> 3) & 7);
-			int texture_vsize = 8 << (ta[2] & 7);
-			pvr_add_drawing_command(d, 3, useTexture ? texture : 0,
-			    texture_usize, texture_vsize,
-			    0,0,0, 0,0,0, 0);
-			d->current_list_type = (ta[0] >> 24) & 7;
-		}
-		break;
-	case 7:	// vertex
-		{
-			struct ieee_float_value fx, fy, fz, u, v, extra1, extra2;
-			ieee_interpret_float_value(ta[1], &fx, IEEE_FMT_S);
-			ieee_interpret_float_value(ta[2], &fy, IEEE_FMT_S);
-			ieee_interpret_float_value(ta[3], &fz, IEEE_FMT_S);
-			ieee_interpret_float_value(ta[4], &u, IEEE_FMT_S);
-			ieee_interpret_float_value(ta[5], &v, IEEE_FMT_S);
-			ieee_interpret_float_value(ta[6], &extra1, IEEE_FMT_S);
-			ieee_interpret_float_value(ta[7], &extra2, IEEE_FMT_S);
+	if (d->ta_commands == NULL) {
+		d->allocated_ta_commands = 2048;
+		d->ta_commands = (uint32_t *) malloc(64 * d->allocated_ta_commands);
+		d->n_ta_commands = 0;
+	}
 
-			// command 1 = normal vertex, command 2 = closing vertex
-			pvr_add_drawing_command(d, 1 + ((ta[0] >> 28) & 1), 0,0,0,
-			    fx.f, fy.f, fz.f, u.f, v.f, extra1.f, extra2.f);
-		}
-		break;
-	case 0:	// end of list
-		{
-			pvr_add_drawing_command(d, 0, 0,0,0, 0,0,0, 0,0,0,0);
+	if (d->n_ta_commands + 1 >= d->allocated_ta_commands) {
+		d->allocated_ta_commands *= 2;
+		d->ta_commands = (uint32_t *) realloc(d->ta_commands, 64 * d->allocated_ta_commands);
+	}
 
-			uint32_t opb_cfg = REG(PVRREG_TA_OPB_CFG);
+	// Hack: I don't understand yet what separates a 32-byte transfer
+	// vs two individual 32-byte transfers vs a 64-byte transfer.
+	// TODO: For now, really only support 32-byte transfers... :(
+	memcpy(d->ta_commands + 16 * d->n_ta_commands, ta, 32);
+	memset(d->ta_commands + 16 * d->n_ta_commands + 8, 0, 32);
+	d->n_ta_commands ++;
 
-			if (d->current_list_type == 0 && opb_cfg & TA_OPB_CFG_OPAQUEPOLY_MASK)
-				SYSASIC_TRIGGER_EVENT(SYSASIC_EVENT_OPAQUEDONE);
-			if (d->current_list_type == 1 && opb_cfg & TA_OPB_CFG_OPAQUEMOD_MASK)
-				SYSASIC_TRIGGER_EVENT(SYSASIC_EVENT_OPAQUEMODDONE);
-			if (d->current_list_type == 2 && opb_cfg & TA_OPB_CFG_TRANSPOLY_MASK)
-				SYSASIC_TRIGGER_EVENT(SYSASIC_EVENT_TRANSDONE);
-			if (d->current_list_type == 3 && opb_cfg & TA_OPB_CFG_TRANSMOD_MASK)
-				SYSASIC_TRIGGER_EVENT(SYSASIC_EVENT_TRANSMODDONE);
-			if (d->current_list_type == 4 && opb_cfg & TA_OPB_CFG_PUNCHTHROUGH_MASK)
-				SYSASIC_TRIGGER_EVENT(SYSASIC_EVENT_PVR_PTDONE);
-		}
-		break;
-	case 1:	// user clip: Ignore for now.
-		/*  TODO  */
-		break;
-	default:fatal("Unimplemented TA command: %i\n", ta[0] >> 29);
-		exit(1);
+	// We need to keep track of the current list type though, and respond
+	// with an event once we reach an end_of_list command. All other
+	// commands are handled in pvr_render() for now.
+	int cmd = (ta[0] >> 29) & 7;
+	if (cmd == 0) {
+		// cmd 0: end of list
+		uint32_t opb_cfg = REG(PVRREG_TA_OPB_CFG);
+
+		if (d->current_list_type == 0 && opb_cfg & TA_OPB_CFG_OPAQUEPOLY_MASK)
+			SYSASIC_TRIGGER_EVENT(SYSASIC_EVENT_OPAQUEDONE);
+		if (d->current_list_type == 1 && opb_cfg & TA_OPB_CFG_OPAQUEMOD_MASK)
+			SYSASIC_TRIGGER_EVENT(SYSASIC_EVENT_OPAQUEMODDONE);
+		if (d->current_list_type == 2 && opb_cfg & TA_OPB_CFG_TRANSPOLY_MASK)
+			SYSASIC_TRIGGER_EVENT(SYSASIC_EVENT_TRANSDONE);
+		if (d->current_list_type == 3 && opb_cfg & TA_OPB_CFG_TRANSMOD_MASK)
+			SYSASIC_TRIGGER_EVENT(SYSASIC_EVENT_TRANSMODDONE);
+		if (d->current_list_type == 4 && opb_cfg & TA_OPB_CFG_PUNCHTHROUGH_MASK)
+			SYSASIC_TRIGGER_EVENT(SYSASIC_EVENT_PVR_PTDONE);
+	} else if (cmd == 4) {
+		// cmd 4: polygon or modifier volume
+		d->current_list_type = (ta[0] >> 24) & 7;
 	}
 }
 
@@ -1027,6 +1493,10 @@ DEVICE_ACCESS(pvr_ta)
 		fatal("pvr_ta access len = %i: TODO\n", (int) len);
 		exit(1);
 	}
+
+	// Tile Accelerator commands can be sent to 0x10000000 through
+	// 0x107fffff, it seems, but the SH4 store queues only have 64 bytes.
+	relative_addr &= (sizeof(d->ta) - 1);
 
 	if (writeflag == MEM_WRITE) {
 		idata = memory_readmax64(cpu, data, len);
@@ -1714,6 +2184,10 @@ DEVICE_ACCESS(pvr)
 		}
 		break;
 
+	case PVRREG_YUV_STAT:
+		// TODO. The "luftvarg" demo accesses this register.
+		break;
+
 	default:if (writeflag == MEM_READ) {
 			fatal("[ pvr: read from UNIMPLEMENTED addr 0x%x ]\n",
 			    (int)relative_addr);
@@ -2054,7 +2528,7 @@ DEVINIT(pvr)
 
 	/*  Tile Accelerator command area at 0x10000000:  */
 	memory_device_register(machine->memory, "pvr_ta",
-	    0x10000000, sizeof(d->ta), dev_pvr_ta_access, d, DM_DEFAULT, NULL);
+	    0x10000000, 0x800000, dev_pvr_ta_access, d, DM_DEFAULT, NULL);
 
 	/*  PVR2 DMA registers at 0x5f6800:  */
 	memory_device_register(machine->memory, "pvr_dma", 0x005f6800,

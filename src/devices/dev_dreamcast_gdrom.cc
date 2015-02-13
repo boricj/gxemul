@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2006-2011  Anders Gavare.  All rights reserved.
+ *  Copyright (C) 2006-2014  Anders Gavare.  All rights reserved.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions are met:
@@ -122,12 +122,41 @@ static void handle_command(struct cpu *cpu, struct dreamcast_gdrom_data *d)
 		}
 		alloc_data(d);
 
-		/*  TODO: Fill TOC in a better way  */
-		d->data[99*4] = 1;	/*  First track  */
-		d->data[100*4] = 2;	/*  Last track  */
+		/*
+		 *  From David Brownlee:
+		 *  "TOC from test booted real CD image on NetBSD/dreamcast
+		 *  01000096,41002e4c,ffffffff * 97,01010000,41020000,6100e641,"
+		 *
+		 *  TODO: Perhaps generalize this in the future, to support
+		 *  disk images with multiple TOCs and/or tracks.
+		 */
+		memset(d->data, 0xff, d->cnt); /* Default data to 0xff */
 
-		d->data[0*4] = 0x10;	/*  Track 1  */
-		d->data[1*4] = 0x10;	/*  Track 2  */
+		d->data[0*4]   = 0x10;  /* Track 1 */
+		d->data[0*4+1] = 0;
+		d->data[0*4+2] = 0;
+		d->data[0*4+3] = 0x96;
+
+		d->data[1*4]   = 0x41;  /* Track 2 */
+		d->data[1*4+1] = 0;
+		d->data[1*4+2] = 0x2e;
+		d->data[1*4+3] = 0x4c;
+
+		d->data[99*4]   = 0x01; /*  First track  */
+		d->data[99*4+1] = 0x01;
+		d->data[99*4+2] = 0;
+		d->data[99*4+3] = 0;
+
+		d->data[100*4]   = 0x41; /*  Last track  */
+		d->data[100*4+1] = 0x02;
+		d->data[100*4+2] = 0;
+		d->data[100*4+3] = 0;
+
+		d->data[101*4]   = 0x61; /*  Leadout  */
+		d->data[101*4+1] = 0;
+		d->data[101*4+2] = 0xe6;
+		d->data[101*4+3] = 0x41;
+ 
 		break;
 
 	case 0x30:
@@ -168,8 +197,6 @@ static void handle_command(struct cpu *cpu, struct dreamcast_gdrom_data *d)
 		// experiments with the Dreamcast PROM can be made instead.
 		if (cpu->machine->prom_emulation) {
 			// printf("sector nr step 1 = %i\n", (int)sector_nr);
-			if (sector_nr >= 1376810)
-				sector_nr -= 1376810;
 
 			// Hack to get NetBSD/dreamcast to work:
 			// See the variable "openpart_start" in NetBSD's
@@ -177,12 +204,6 @@ static void handle_command(struct cpu *cpu, struct dreamcast_gdrom_data *d)
 			sector_nr -= 150;
 
 			// printf("sector nr step 2 = %i\n", (int)sector_nr);
-
-			if (sector_nr < 1000)
-				sector_nr += (diskimage_get_baseoffset(cpu->machine, 0, DISKIMAGE_IDE)
-				 / 2048);
-
-			// printf("sector nr step 3 = %i\n", (int)sector_nr);
 		} else {
 			// printf("sector nr step 1 = %i\n", (int)sector_nr);
 			sector_nr -= 45150;
@@ -240,6 +261,16 @@ static void handle_command(struct cpu *cpu, struct dreamcast_gdrom_data *d)
 		d->cnt = 32768;
 
 	SYSASIC_TRIGGER_EVENT(SYSASIC_EVENT_GDROM);
+}
+
+void dreamcast_gdrom_update_stat(struct cpu *cpu, struct dreamcast_gdrom_data *d)
+{
+	// See NetBSD's gdrom.c.
+	d->stat = 6;
+
+	if (diskimage_exist(cpu->machine, 0, DISKIMAGE_IDE)) {
+		d->stat = 0;
+	}
 }
 
 
@@ -317,14 +348,11 @@ DEVICE_ACCESS(dreamcast_gdrom)
 
 	case GDROM_REGX:
 		if (writeflag == MEM_READ) {
-			fatal("Read from GDROM_REGX?\n");
-			// exit(1);
+			debug("[ Read to GDROM_REGX? ]\n");
 		} else {
 			/*  NetBSD/dreamcast writes 0 here.  */
-			if (idata != 0) {
-				fatal("[ Write to GDROM_REGX? ]\n");
-				/*  exit(1);  */
-			}
+			if (idata != 0)
+				debug("[ Write 0x%x to GDROM_REGX? ]\n", (int)idata);
 		}
 		break;
 
@@ -342,6 +370,7 @@ DEVICE_ACCESS(dreamcast_gdrom)
 
 	case GDROM_STAT:
 		if (writeflag == MEM_READ) {
+			dreamcast_gdrom_update_stat(cpu, d);
 			odata = d->stat;
 		} else {
 			fatal("[ Write to GDROM_STAT? ]\n");
@@ -389,7 +418,7 @@ DEVICE_ACCESS(dreamcast_gdrom)
 				d->busy |= 0x08;
 				d->cmd_count = 0;
 			} else if (idata == 0xef) {
-				fatal("dreamcast_gdrom: ROM: TODO\n");
+				debug("dreamcast_gdrom: ROM: TODO\n");
 				SYSASIC_TRIGGER_EVENT(SYSASIC_EVENT_GDROM);
 			} else {
 				fatal("dreamcast_gdrom: unimplemented "
